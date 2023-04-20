@@ -1,5 +1,9 @@
+#include "stdlib.h"
+
 #ifndef CMALLOC
 #define CMALLOC
+
+#include "math.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -25,19 +29,28 @@ struct block
 };
 
 void* cmalloc(cmsize_t size);
-void free(void* loc);
+void cfree(void* loc);
 inline void* cmalloc_array(cmsize_t size, cmsize_t array_size) { return cmalloc(size * array_size); }
-void free_array(void* loc) { free(loc); }
-
-#ifdef __cplusplus
-}
-#endif
+void cfree_array(void* loc) { free(loc); }
 
 #define CMALLOC_COMPILE
 
 #ifdef CMALLOC_COMPILE
-
 block* blocks;
+
+void* sys_alloc(cmsize_t size)
+{
+    // For now, just use malloc
+    // In the future, use mmap/sbrk or VirtualAlloc
+    return malloc(size * 4096);
+}
+
+void sys_free(void* loc)
+{
+    // For now, just use free
+    // In the future, use munmap/sbrk or VirtualFree
+    free(loc);
+}
 
 inline cmi32_t bit_scan_fw(cmu64_t x) 
 {
@@ -52,10 +65,10 @@ cmsize_t find_free(block bk)
 
     for (cmsize_t i = 0; i < bk.num_locs; i++)
     {
-        if (*(cmu64_t*)(bk.last_found + i) != 0) // If the location block is not free
+        if (*(cmu64_t*)((cmu8_t*)bk.last_found + i) != 0) // If the location block is not free
         {
             // Update the last found location block
-            bk.last_found = bk.last_found + i;
+            bk.last_found = (cmu8_t*)bk.last_found + i;
 
             // Find the first free bit in the location block
             cmi32_t loc_in_block = bit_scan_fw(*(cmu64_t*)(bk.last_found));
@@ -64,7 +77,7 @@ cmsize_t find_free(block bk)
             *(cmu64_t*)(bk.last_found) &= ~(1 << loc_in_block);
 
             // Return the location
-            return (cmu64_t) (bk.last_found - bk.bitmap_ptr) * bk.size + loc_in_block;
+            return (cmu64_t) ((cmu8_t*)bk.last_found - (cmu8_t*)bk.bitmap_ptr) * bk.size + loc_in_block;
         }
     }
 }
@@ -85,20 +98,20 @@ void* cmalloc(cmsize_t size)
     }
 
     size_t first_free = find_free(blocks[(size_t) log2_size]);
-    return blocks[(size_t) log2_size].data + first_free;
+    return (cmu8_t*)blocks[(size_t) log2_size].data + first_free;
 }
 
-void* free(void* loc)
+void cfree(void* loc)
 {
     // Find the block that the location is in (by iteration)
     // Free it from bitmap
 
     for (size_t i = 0; i < 13; i++)
     {
-        if (blocks[i].data <= loc && loc < blocks[i].data + blocks[i].size)
+        if (blocks[i].data <= loc && loc < (cmu8_t*)blocks[i].data + blocks[i].num_locs * blocks[i].size)
         {
             // Find the location in the bitmap
-            cmsize_t loc_in_bitmap = (loc - blocks[i].data) / blocks[i].size;
+            cmsize_t loc_in_bitmap = ((cmu8_t*)loc - (cmu8_t*)blocks[i].data) / blocks[i].size;
 
             // Find the location block in the bitmap
             cmsize_t loc_block = loc_in_bitmap / 64;
@@ -107,11 +120,43 @@ void* free(void* loc)
             cmsize_t loc_in_block = loc_in_bitmap % 64;
 
             // Update the bitmap
-            *(cmu64_t*)(blocks[i].bitmap_ptr + loc_block) |= 1 << loc_in_block;
+            *((cmu8_t*)(blocks[i].bitmap_ptr) + loc_block) |= 1 << loc_in_block;
         }
     }
 }
 
+void init()
+{
+    cmsize_t num_locs = 4096; // Number of locations in the bitmap
+
+    // Initialize the blocks
+    blocks = (block*) sys_alloc(13 * sizeof(block));
+
+    for (size_t i = 0; i < 13; i++)
+    {
+        blocks[i].data = sys_alloc((1 << i));
+        blocks[i].bitmap_ptr = sys_alloc(1);
+        blocks[i].last_found = blocks[i].bitmap_ptr;
+        blocks[i].num_locs = 4096;
+        blocks[i].size = 1 << i;
+    }
+}
+
+void deinit()
+{
+    // Deinitialize the blocks
+    for (size_t i = 0; i < 13; i++)
+    {
+        sys_free(blocks[i].data);
+        sys_free(blocks[i].bitmap_ptr);
+    }
+
+    sys_free(blocks);
+}
+
+#ifdef __cplusplus
+}
+#endif
 #endif
 #endif
 
